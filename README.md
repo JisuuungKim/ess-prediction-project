@@ -52,8 +52,10 @@ pip install -r requirements.txt
 ```
 configs/config.py파일 변경 (DEFAULT_DATA_DIR,DEFAULT_OUTPUT_DIR,DEFAULT_FEATURE_CACHE_DIR) 에 대해서 설정해준다.
 
-DEFAULT_DATA_DIR: 원본 데이터 위치입니다. 이 프로젝트에서는 배터리 .mat 파일들을 읽어오는 입력 폴더로 쓰인다.
+DEFAULT_DATA_DIR: 원본 데이터 위치이다. 이 프로젝트에서는 배터리 .mat 파일들을 읽어오는 입력 폴더로 쓰인다.
+
 DEFAULT_OUTPUT_DIR: 모델 학습/평가 결과를 저장하는 위치이다. 예를 들면 best_summary.json, 예측 결과 CSV, 평가 리포트 같은 최종 산출물이 들어간다.
+
 DEFAULT_FEATURE_CACHE_DIR: 피처 엔지니어링 결과를 캐시하는 위치이다. 배치별 features_*.csv나 features_all_batches.csv처럼, 모델링 전에 만들어 두는 중간 산출물이 저장된다.
 
 
