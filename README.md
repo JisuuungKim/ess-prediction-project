@@ -53,8 +53,8 @@ pip install -r requirements.txt
 configs/config.py파일 변경 (DEFAULT_DATA_DIR,DEFAULT_OUTPUT_DIR,DEFAULT_FEATURE_CACHE_DIR) 에 대해서 설정해준다.
 
 DEFAULT_DATA_DIR: 원본 데이터 위치입니다. 이 프로젝트에서는 배터리 .mat 파일들을 읽어오는 입력 폴더로 쓰인다.
-DEFAULT_OUTPUT_DIR: 모델 학습/평가 결과를 저장하는 위치입니다. 예를 들면 best_summary.json, 예측 결과 CSV, 평가 리포트 같은 최종 산출물이 들어간다.
-DEFAULT_FEATURE_CACHE_DIR: 피처 엔지니어링 결과를 캐시하는 위치입니다. 배치별 features_*.csv나 features_all_batches.csv처럼, 모델링 전에 만들어 두는 중간 산출물이 저장된다.
+DEFAULT_OUTPUT_DIR: 모델 학습/평가 결과를 저장하는 위치이다. 예를 들면 best_summary.json, 예측 결과 CSV, 평가 리포트 같은 최종 산출물이 들어간다.
+DEFAULT_FEATURE_CACHE_DIR: 피처 엔지니어링 결과를 캐시하는 위치이다. 배치별 features_*.csv나 features_all_batches.csv처럼, 모델링 전에 만들어 두는 중간 산출물이 저장된다.
 
 
 
@@ -203,8 +203,6 @@ EDA 결과를 바탕으로 선택한 Feature와 선택한 이유는 다음과 �
   - 전체적으로 보면, 현재 모델은 test 셀들을 대략 두 덩어리로 나누어 해석하고 있는 것으로 보인다. 하나는 실제 400~ 500대 셀들이지만 예측은 500~ ~7~00대로 올라간 저수명 그룹이고, 다른 하나는 실제 800 이상 셀들인데 예측이 900 ~1000대에 모인 중상수명 그룹이다. 즉, 모델은 “낮은 그룹”과 “높은 그룹”을 구분하는 데는 어느 정도 성공했지만, 각 그룹 내부에서 세밀한 순위를 맞추는 능력은 제한적이다. 이 때문에 저수명 셀은 덜 나쁘게, 고수명 셀은 덜 좋게 예측하는 평균 회귀 현상이 나타난다.
 
 ## ESS 도메인 해석
-
-분석 결과를 실제 ESS 운영 관점에서 해석
 
 ### 이 모델을 실제 BESS에 적용한다면 어떤 의사결정에 활용 가능한가?
 
