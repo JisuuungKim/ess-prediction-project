@@ -1,4 +1,4 @@
-"""배치 수명 예측: 피처 스크리닝 + Ridge / SVR / XGBoost / CatBoost / LightGBM."""
+"""배치 수명 예측: ΔQ 기반 피처 스크리닝 + Ridge / ElasticNet / HistGB."""
 from __future__ import annotations
 
 
@@ -11,17 +11,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
+from sklearn.base import clone
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import ElasticNet, Lasso, Ridge
-from sklearn.svm import SVR
+from sklearn.linear_model import ElasticNet, ElasticNetCV, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, make_scorer
-from sklearn.model_selection import GroupKFold, KFold, cross_validate
+from sklearn.model_selection import GroupKFold, KFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from configs.config import (
     BLOCK_MAX_FEATURES,
+    DEFAULT_ALPHA_GRID,
     DEFAULT_FEATURE_CACHE_DIR,
+    DEFAULT_L1_RATIO_GRID,
     DEFAULT_OUTPUT_DIR,
     FEATURE_BLOCKS,
     HIGH_CORR_THRESHOLD,
@@ -35,38 +38,72 @@ def _feature_block(name: str) -> list[str]:
     return list(FEATURE_BLOCKS.get(name, []))
 
 
-try:
-    from xgboost import XGBRegressor
-except ImportError:
-    XGBRegressor = None
-
-try:
-    from lightgbm import LGBMRegressor
-except ImportError:
-    LGBMRegressor = None
-
-try:
-    from catboost import CatBoostRegressor
-except ImportError:
-    CatBoostRegressor = None
-
 RANDOM_STATE = 42
 VALID_RATIO = 0.2
 CV_SPLITS = 5
 GROUP_COL = "charging_policy"
 TARGET_COL = "cycle_life"
 TARGET_PAPER_MAPE = 9.1
+# 기본 피처 세트 상위 k개 제한 (set별 오버라이드가 없을 때 사용)
+DEFAULT_MAX_FEATURES_PER_SET = 12
 # 최종 모델 선정: 보정 MAPE + 원시 테스트 MAPE 조합 (보정만 과하게 좋은 조합 배제)
 COMPOSITE_WEIGHT_CAL = 0.55
 COMPOSITE_WEIGHT_RAW = 0.45
 # None = 모든 피처 세트 평가. 예: ["discharge_model"] 만 쓰려면 리스트로 지정
 FEATURE_SET_NAMES_TO_RUN: list[str] | None = None
-# None = 논문+EDA 피처 세트 그대로. 리스트를 주면 해당 컬럼만 사용하는 단일 세트(delta_q_std_only)로만 평가 (features.py의 ΔQ 요약량).
-OVERRIDE_INPUT_FEATURES: list[str] | None = ["delta_q_std"]
+# ΔQ 기반 모델 재현을 위한 수동 지정 (None = paper/EDA 규칙 사용)
+OVERRIDE_INPUT_FEATURES: list[str] | None = None
 # 수명 분포가 한쪽으로 치우쳐 있어 log1p 타깃이 MAPE에 유리한 경우가 많음
 USE_LOG_TARGET = True
 # log1p 역변환에서 expm1 폭주(inf) 방지 — sklearn 메트릭은 유한값만 허용
 _MAX_LOG_CYCLE = float(np.log1p(1e6))
+PAPER_VARIANCE_FEATURES = ["delta_q_log_variance", "delta_q_std"]
+DISCHARGE_FEATURE_CANDIDATES = [
+    "delta_q_log_variance",
+    "delta_q_std",
+    "delta_q_range",
+    "delta_q_mean",
+    "delta_q_min",
+    "delta_q_max",
+    "delta_q_abs_area",
+    "delta_q_signed_area",
+    "delta_q_lowV_mean",
+    "delta_q_midV_mean",
+    "delta_q_highV_mean",
+    "qd_drop_100",
+    "qd_cv_100",
+]
+FULL_MODEL_EXTRA_CANDIDATES = [
+    "mean_Tavg",
+    "temp_rise_100",
+    "mean_IR",
+    "ir_rise_100",
+    "mean_chargetime",
+    "chargetime_rise_100",
+    "mean_c_rate",
+    "max_c_rate",
+    "policy_steps",
+    "switch_soc_pct",
+    "baseline_fade_rate",
+    "fade_acceleration_ratio",
+    "knee_cycle",
+]
+PAPER_FEATURE_SPECS: dict[str, dict[str, Any]] = {
+    "variance_model": {
+        "candidates": PAPER_VARIANCE_FEATURES,
+        "max_features": 1,
+        "required": ["delta_q_log_variance"],
+    },
+    "discharge_model": {
+        "candidates": DISCHARGE_FEATURE_CANDIDATES,
+        "max_features": 6,
+    },
+    "full_model": {
+        "candidates": list(dict.fromkeys(DISCHARGE_FEATURE_CANDIDATES + FULL_MODEL_EXTRA_CANDIDATES)),
+        "max_features": 9,
+    },
+}
+SAMPLE_WEIGHT_SCHEMES: tuple[str, ...] = ("none", "inv_cycle", "inv_cycle_sqrt")
 
 
 def _inverse_log1p_cycle(y_log):
@@ -75,69 +112,60 @@ def _inverse_log1p_cycle(y_log):
     return np.expm1(y_log)
 
 
-RIDGE_PARAMS: dict[str, Any] = {"alpha": 5.0}
-XGB_PARAMS: dict[str, Any] = {
-    "objective": "reg:squarederror",
-    "eval_metric": "mae",
-    "n_estimators": 600,
-    "learning_rate": 0.035,
-    "max_depth": 3,
-    "min_child_weight": 5,
-    "subsample": 0.82,
-    "colsample_bytree": 0.72,
-    "gamma": 0.08,
-    "reg_alpha": 0.2,
-    "reg_lambda": 3.0,
-    "random_state": RANDOM_STATE,
-    "n_jobs": -1,
-}
-LGBM_PARAMS: dict[str, Any] = {
-    "objective": "regression",
-    "metric": "mae",
-    "n_estimators": 600,
-    "learning_rate": 0.035,
-    "num_leaves": 16,
-    "max_depth": 4,
-    "min_child_samples": 10,
-    "subsample": 0.82,
-    "colsample_bytree": 0.72,
-    "reg_alpha": 0.2,
-    "reg_lambda": 3.0,
-    "random_state": RANDOM_STATE,
-    "verbose": -1,
-    "n_jobs": -1,
-}
-CATBOOST_PARAMS: dict[str, Any] = {
-    "loss_function": "MAE",
-    "iterations": 600,
-    "learning_rate": 0.045,
-    "depth": 5,
-    "l2_leaf_reg": 3.5,
-    "random_state": RANDOM_STATE,
-    "verbose": False,
-    "thread_count": -1,
-}
-ELASTICNET_PARAMS: dict[str, Any] = {
-    "alpha": 0.05,
-    "l1_ratio": 0.5,
-    "max_iter": 10_000,
-    "random_state": RANDOM_STATE,
-}
-SVR_PARAMS: dict[str, Any] = {
-    "kernel": "rbf",
-    "C": 0.5,
-    "epsilon": 0.1,
-    "gamma": "scale",
-}
-LASSO_PARAMS: dict[str, Any] = {
-    "alpha": 0.01,
-    "max_iter": 10_000,
-    "random_state": RANDOM_STATE,
-    "selection": "random"
-}
+def _compute_sample_weight(y: pd.Series | np.ndarray, scheme: str | None):
+    if scheme in (None, "none"):
+        return None
+    values = np.asarray(y, dtype=float).flatten()
+    if scheme == "inv_cycle":
+        weights = 1.0 / np.clip(values, 1.0, None)
+    elif scheme == "inv_cycle_sqrt":
+        weights = 1.0 / np.sqrt(np.clip(values, 1.0, None))
+    else:
+        return None
+    weights = np.clip(weights, 1e-6, 1e6)
+    mean = np.mean(weights)
+    return weights / mean if mean > 0 else weights
 
-# Ridge·SVR는 스케일 민감 / 트리 부스팅은 스케일 불필요(내부 분할)
-MODELS_NEED_SCALING = frozenset({"Ridge", "Lasso", "ElasticNet", "SVR"})
+
+def _fit_params_for_estimator(estimator: Any, sample_weight):
+    if sample_weight is None:
+        return {}
+    if isinstance(estimator, TransformedTargetRegressor):
+        reg = estimator.regressor
+        if isinstance(reg, Pipeline):
+            return {"model__sample_weight": sample_weight}
+        return {"sample_weight": sample_weight}
+    if isinstance(estimator, Pipeline):
+        return {"model__sample_weight": sample_weight}
+    return {"sample_weight": sample_weight}
+
+
+RIDGE_PARAMS: dict[str, Any] = {"alpha": 1.5}
+ELASTICNET_PARAMS: dict[str, Any] = {
+    "alpha": 0.03,
+    "l1_ratio": 0.4,
+    "max_iter": 10_000,
+    "random_state": RANDOM_STATE,
+}
+ELASTICNET_CV_PARAMS: dict[str, Any] = {
+    "l1_ratio": DEFAULT_L1_RATIO_GRID,
+    "alphas": DEFAULT_ALPHA_GRID,
+    "max_iter": 20_000,
+    "cv": CV_SPLITS,
+    "n_jobs": None,
+    "random_state": RANDOM_STATE,
+}
+HGB_PARAMS: dict[str, Any] = {
+    "max_depth": 3,
+    "learning_rate": 0.035,
+    "max_iter": 600,
+    "l2_regularization": 0.2,
+    "min_samples_leaf": 15,
+    "max_leaf_nodes": 31,
+    "random_state": RANDOM_STATE,
+}
+# 스케일 민감 모델 → pipeline에서 표준화 적용
+MODELS_NEED_SCALING = frozenset({"Ridge", "ElasticNet", "ElasticNetCV"})
 
 
 def mape(y_true, y_pred) -> float:
@@ -305,37 +333,59 @@ def select_feature_blocks(train_df: pd.DataFrame):
     return selected_blocks, feature_report, pair_report, vif_report
 
 
+def select_features_from_candidates(
+    train_df: pd.DataFrame,
+    candidates: list[str],
+    max_features: int,
+    required: list[str] | None = None,
+) -> tuple[list[str], pd.DataFrame]:
+    available = [f for f in candidates if f in train_df.columns]
+    if not available:
+        return [], pd.DataFrame()
+    corr_report = feature_target_corr(train_df, available)
+    selected: list[str] = []
+    forced = [f for f in (required or []) if f in available]
+    for feat in forced:
+        if feat not in selected:
+            selected.append(feat)
+    for feature in corr_report["feature"]:
+        if len(selected) >= max_features:
+            break
+        if feature in selected:
+            continue
+        keep = True
+        for kept in selected:
+            pair = train_df[[feature, kept]].dropna()
+            if len(pair) >= 3 and abs(_pairwise_corr(pair[feature], pair[kept])) >= HIGH_CORR_THRESHOLD:
+                keep = False
+                break
+        if keep:
+            selected.append(feature)
+        if len(selected) >= max_features:
+            break
+    return selected, corr_report
+
+
 def build_paper_feature_sets(df: pd.DataFrame):
-    available = set(df.columns)
-    variance_model = [f for f in ["delta_q_log_variance", "log_delta_q_var"] if f in available]
-    discharge_model = [
-        f
-        for f in (
-            FEATURE_BLOCKS["summary"]
-            + FEATURE_BLOCKS["fade"]
-            + FEATURE_BLOCKS["delta_q"]
-            + _feature_block("bench_delta")
-            + _feature_block("bench_early")
-            + ["delta_q_log_variance"]
+    feature_sets: dict[str, list[str]] = {}
+    limits: dict[str, int] = {}
+    report_frames: list[pd.DataFrame] = []
+    for name, spec in PAPER_FEATURE_SPECS.items():
+        selected, corr_report = select_features_from_candidates(
+            df,
+            spec["candidates"],
+            spec["max_features"],
+            spec.get("required"),
         )
-        if f in available
-    ]
-    full_model = [
-        f
-        for f in (
-            FEATURE_BLOCKS["summary"]
-            + FEATURE_BLOCKS["charging"]
-            + FEATURE_BLOCKS["fade"]
-            + FEATURE_BLOCKS["delta_q"]
-            + _feature_block("bench_delta")
-            + _feature_block("bench_early")
-            + _feature_block("bench_policy")
-            + _feature_block("bench_cross")
-            + ["delta_q_log_variance"]
-        )
-        if f in available
-    ]
-    return {"variance_model": variance_model, "discharge_model": discharge_model, "full_model": full_model}
+        feature_sets[name] = selected
+        limits[name] = min(spec["max_features"], len(selected)) if selected else 0
+        if not corr_report.empty:
+            corr_report = corr_report.copy()
+            corr_report["feature_set"] = name
+            corr_report["selected"] = corr_report["feature"].isin(selected)
+            report_frames.append(corr_report)
+    report = pd.concat(report_frames, ignore_index=True) if report_frames else pd.DataFrame()
+    return feature_sets, limits, report
 
 
 def build_eda_feature_sets(selected_blocks: dict):
@@ -354,31 +404,24 @@ def build_eda_feature_sets(selected_blocks: dict):
     discharge_model_eda = list(
         dict.fromkeys(summary + fade + delta_q + bench_d + bench_e + discharge_extra)
     )
-    return {
+    eda_sets = {
         "eda_all_pruned": eda_all_pruned,
-        "discharge_model": discharge_model_eda,
+        "eda_discharge_screened": discharge_model_eda,
     }
+    eda_limits = {
+        "eda_all_pruned": min(len(eda_all_pruned), DEFAULT_MAX_FEATURES_PER_SET),
+        "eda_discharge_screened": min(len(discharge_model_eda), 8),
+    }
+    return eda_sets, eda_limits
 
 
 def build_model_registry() -> dict[str, Any]:
-    """Ridge, SVR(sklearn) + XGBoost, CatBoost, LightGBM(선택 설치)."""
+    """논문 구조에 맞춘 간단한 선형 계열 레지스트리 (Ridge + ElasticNet)."""
     models: dict[str, Any] = {}
     models["Ridge"] = Ridge(**RIDGE_PARAMS)
-    models["Lasso"] = Lasso(**LASSO_PARAMS)
-    models["SVR"] = SVR(**SVR_PARAMS)
-    if XGBRegressor is not None:
-        models["XGBoost"] = XGBRegressor(**XGB_PARAMS)
-    else:
-        warnings.warn("xgboost 미설치 → XGBoost 제외", stacklevel=2)
-    if CatBoostRegressor is not None:
-        models["CatBoost"] = CatBoostRegressor(**CATBOOST_PARAMS)
-    else:
-        warnings.warn("catboost 미설치 → CatBoost 제외", stacklevel=2)
-    if LGBMRegressor is not None:
-        models["LightGBM"] = LGBMRegressor(**LGBM_PARAMS)
-    else:
-        warnings.warn("lightgbm 미설치 → LightGBM 제외", stacklevel=2)
     models["ElasticNet"] = ElasticNet(**ELASTICNET_PARAMS)
+    models["ElasticNetCV"] = ElasticNetCV(**ELASTICNET_CV_PARAMS)
+    models["HistGB"] = HistGradientBoostingRegressor(**HGB_PARAMS)
     return models
 
 
@@ -457,30 +500,37 @@ def cross_validate_model(
     x_train: pd.DataFrame,
     y_train: pd.Series,
     groups: pd.Series | None,
+    sample_weight: np.ndarray | None,
 ) -> dict[str, float]:
-    scorers = make_cv_scorers()
     n_samples = len(x_train)
     if groups is not None:
         n_g = int(groups.nunique(dropna=True))
         if n_g >= 2:
             n_splits = min(CV_SPLITS, n_g)
             cv = GroupKFold(n_splits=n_splits)
-            cv_result = cross_validate(
-                pipeline, x_train, y_train, groups=groups, cv=cv, scoring=scorers, n_jobs=None
-            )
+            split_iterator = cv.split(x_train, y_train, groups=groups)
         else:
             cv = KFold(n_splits=min(5, max(2, n_samples // 3)), shuffle=True, random_state=RANDOM_STATE)
-            cv_result = cross_validate(pipeline, x_train, y_train, cv=cv, scoring=scorers, n_jobs=None)
+            split_iterator = cv.split(x_train, y_train)
     else:
         n_splits = min(CV_SPLITS, max(2, n_samples // 5))
         cv = KFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-        cv_result = cross_validate(pipeline, x_train, y_train, cv=cv, scoring=scorers, n_jobs=None)
-    return {
-        "rmse": float(-np.mean(cv_result["test_rmse"])),
-        "mae": float(-np.mean(cv_result["test_mae"])),
-        "r2": float(np.mean(cv_result["test_r2"])),
-        "mape": float(-np.mean(cv_result["test_mape"])),
-    }
+        split_iterator = cv.split(x_train, y_train)
+
+    weight_array = None if sample_weight is None else np.asarray(sample_weight, dtype=float)
+    metric_lists = {"rmse": [], "mae": [], "r2": [], "mape": []}
+    for train_idx, valid_idx in split_iterator:
+        model = clone(pipeline)
+        sw = weight_array[train_idx] if weight_array is not None else None
+        fit_params = _fit_params_for_estimator(model, sw)
+        x_fold = x_train.iloc[train_idx]
+        y_fold = y_train.iloc[train_idx]
+        model.fit(x_fold, y_fold, **fit_params)
+        preds = model.predict(x_train.iloc[valid_idx])
+        fold_metrics = evaluate_regression(y_train.iloc[valid_idx], preds)
+        for key in metric_lists:
+            metric_lists[key].append(fold_metrics[key])
+    return {k: float(np.mean(v)) for k, v in metric_lists.items()}
 
 
 def calibrate_linear_on_valid(y_valid_true, y_valid_pred, y_test_pred, y_b3_pred):
@@ -613,6 +663,7 @@ def run_sklearn_search(
     test_df: pd.DataFrame,
     batch3_df: pd.DataFrame,
     feature_sets: dict[str, list[str]],
+    feature_limits: dict[str, int | None],
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """각 (피처세트 × 모델) 학습·평가. stable_* 중복 세트 없음."""
     rows: list[dict[str, Any]] = []
@@ -621,79 +672,95 @@ def run_sklearn_search(
     print(f"[models] {list(registry.keys())}", flush=True)
 
     for fs_name, feature_cols in feature_sets.items():
+        # 세트 정의에 있는 컬럼 중 실제 train_df에 존재하는 것만 사용
         feature_cols = [c for c in feature_cols if c in train_df.columns]
         if not feature_cols:
             continue
-        x_tr = train_df[feature_cols].copy()
+        corr_report = feature_target_corr(train_df, feature_cols)
+        top_k = feature_limits.get(fs_name, DEFAULT_MAX_FEATURES_PER_SET)
+        if top_k is None or top_k <= 0:
+            top_feats = corr_report["feature"].tolist()
+        else:
+            top_feats = corr_report["feature"].head(top_k).tolist()
+        used_feats = [c for c in top_feats if c in train_df.columns]
+        if not used_feats:
+            continue
+
+        x_tr = train_df[used_feats].copy()
         y_tr = train_df[TARGET_COL].copy()
-        x_va = valid_df[feature_cols].copy()
+        x_va = valid_df[used_feats].copy()
         y_va = valid_df[TARGET_COL].copy()
-        x_te = test_df[feature_cols].copy()
+        x_te = test_df[used_feats].copy()
         y_te = test_df[TARGET_COL].copy()
-        x_b3 = batch3_df[feature_cols].copy()
+        x_b3 = batch3_df[used_feats].copy()
         y_b3 = batch3_df[TARGET_COL].copy()
 
         for model_name, model in registry.items():
-            pipeline = build_model_pipeline(model_name, model, x_tr)
-            try:
-                cv_metrics = cross_validate_model(pipeline, x_tr, y_tr, groups_train)
-            except Exception as e:
-                warnings.warn(f"[{fs_name}/{model_name}] CV 실패: {e}", stacklevel=2)
-                continue
+            for weight_scheme in SAMPLE_WEIGHT_SCHEMES:
+                sample_weight = _compute_sample_weight(y_tr, weight_scheme)
+                pipeline = build_model_pipeline(model_name, model, x_tr)
+                try:
+                    cv_metrics = cross_validate_model(pipeline, x_tr, y_tr, groups_train, sample_weight)
+                except Exception as e:
+                    warnings.warn(f"[{fs_name}/{model_name}/{weight_scheme}] CV 실패: {e}", stacklevel=2)
+                    continue
 
-            pipeline.fit(x_tr, y_tr)
-            pred_va = pipeline.predict(x_va)
-            pred_te = pipeline.predict(x_te)
-            pred_b3 = pipeline.predict(x_b3)
+                fit_params = _fit_params_for_estimator(pipeline, sample_weight)
+                pipeline.fit(x_tr, y_tr, **fit_params)
+                pred_va = pipeline.predict(x_va)
+                pred_te = pipeline.predict(x_te)
+                pred_b3 = pipeline.predict(x_b3)
 
-            m_va = evaluate_regression(y_va, pred_va)
-            m_te = evaluate_regression(y_te, pred_te)
-            m_b3 = evaluate_regression(y_b3, pred_b3)
-            cal_te, cal_b3, cal_a, cal_b = calibrate_linear_on_valid(y_va, pred_va, pred_te, pred_b3)
-            m_te_cal = mape(y_te, cal_te) if np.isfinite(cal_te).all() else float("nan")
-            m_b3_cal = mape(y_b3, cal_b3) if np.isfinite(cal_b3).all() else float("nan")
-            m_te_cal_mae = (
-                float(mean_absolute_error(y_te, cal_te)) if np.isfinite(cal_te).all() else float("nan")
-            )
-            m_b3_cal_mae = (
-                float(mean_absolute_error(y_b3, cal_b3)) if np.isfinite(cal_b3).all() else float("nan")
-            )
+                m_va = evaluate_regression(y_va, pred_va)
+                m_te = evaluate_regression(y_te, pred_te)
+                m_b3 = evaluate_regression(y_b3, pred_b3)
+                cal_te, cal_b3, cal_a, cal_b = calibrate_linear_on_valid(y_va, pred_va, pred_te, pred_b3)
+                m_te_cal = mape(y_te, cal_te) if np.isfinite(cal_te).all() else float("nan")
+                m_b3_cal = mape(y_b3, cal_b3) if np.isfinite(cal_b3).all() else float("nan")
+                m_te_cal_mae = (
+                    float(mean_absolute_error(y_te, cal_te)) if np.isfinite(cal_te).all() else float("nan")
+                )
+                m_b3_cal_mae = (
+                    float(mean_absolute_error(y_b3, cal_b3)) if np.isfinite(cal_b3).all() else float("nan")
+                )
 
-            robust = (
-                0.15 * m_va["mape"] + 0.45 * m_te_cal + 0.4 * m_b3_cal
-                if np.isfinite(m_te_cal) and np.isfinite(m_b3_cal)
-                else float("nan")
-            )
+                robust = (
+                    0.15 * m_va["mape"] + 0.45 * m_te_cal + 0.4 * m_b3_cal
+                    if np.isfinite(m_te_cal) and np.isfinite(m_b3_cal)
+                    else float("nan")
+                )
 
-            row = {
-                "feature_set": fs_name,
-                "model_name": model_name,
-                "cv_rmse": cv_metrics["rmse"],
-                "cv_mae": cv_metrics["mae"],
-                "cv_r2": cv_metrics["r2"],
-                "cv_mape": cv_metrics["mape"],
-                "valid_rmse": m_va["rmse"],
-                "valid_mae": m_va["mae"],
-                "valid_r2": m_va["r2"],
-                "valid_mape": m_va["mape"],
-                "test_rmse": m_te["rmse"],
-                "test_mae": m_te["mae"],
-                "test_r2": m_te["r2"],
-                "test_mape": m_te["mape"],
-                "batch3_rmse": m_b3["rmse"],
-                "batch3_mae": m_b3["mae"],
-                "batch3_r2": m_b3["r2"],
-                "batch3_mape": m_b3["mape"],
-                "calibrated_test_mape": m_te_cal,
-                "calibrated_batch3_mape": m_b3_cal,
-                "calibrated_test_mae": m_te_cal_mae,
-                "calibrated_batch3_mae": m_b3_cal_mae,
-                "calibration_a": cal_a,
-                "calibration_b": cal_b,
-                "gap_vs_paper": m_te["mape"] - TARGET_PAPER_MAPE,
-                "robust_score": robust,
-            }
-            rows.append(row)
+                row = {
+                    "feature_set": fs_name,
+                    "used_features": ",".join(used_feats),
+                    "model_name": model_name,
+                    "sample_weight_scheme": weight_scheme,
+                    "cv_rmse": cv_metrics["rmse"],
+                    "cv_mae": cv_metrics["mae"],
+                    "cv_r2": cv_metrics["r2"],
+                    "cv_mape": cv_metrics["mape"],
+                    "valid_rmse": m_va["rmse"],
+                    "valid_mae": m_va["mae"],
+                    "valid_r2": m_va["r2"],
+                    "valid_mape": m_va["mape"],
+                    "test_rmse": m_te["rmse"],
+                    "test_mae": m_te["mae"],
+                    "test_r2": m_te["r2"],
+                    "test_mape": m_te["mape"],
+                    "batch3_rmse": m_b3["rmse"],
+                    "batch3_mae": m_b3["mae"],
+                    "batch3_r2": m_b3["r2"],
+                    "batch3_mape": m_b3["mape"],
+                    "calibrated_test_mape": m_te_cal,
+                    "calibrated_batch3_mape": m_b3_cal,
+                    "calibrated_test_mae": m_te_cal_mae,
+                    "calibrated_batch3_mae": m_b3_cal_mae,
+                    "calibration_a": cal_a,
+                    "calibration_b": cal_b,
+                    "gap_vs_paper": m_te["mape"] - TARGET_PAPER_MAPE,
+                    "robust_score": robust,
+                }
+                rows.append(row)
 
     search_df = pd.DataFrame(rows)
     if search_df.empty:
@@ -711,15 +778,20 @@ def run_sklearn_search(
     br = search_df.iloc[0]
     fs_best = str(br["feature_set"])
     mn_best = str(br["model_name"])
-    cols_best = [c for c in feature_sets[fs_best] if c in train_df.columns]
+    weight_best = str(br.get("sample_weight_scheme", "none"))
+    best_used = [c for c in str(br["used_features"]).split(",") if c]
+    cols_best = [c for c in best_used if c in train_df.columns]
     x_tr = train_df[cols_best].copy()
     y_tr = train_df[TARGET_COL].copy()
     best_pl = build_model_pipeline(mn_best, registry[mn_best], x_tr)
-    best_pl.fit(x_tr, y_tr)
+    best_sample_weight = _compute_sample_weight(y_tr, weight_best)
+    best_fit_params = _fit_params_for_estimator(best_pl, best_sample_weight)
+    best_pl.fit(x_tr, y_tr, **best_fit_params)
 
     meta = {
         "best_feature_set": fs_best,
         "best_model_name": mn_best,
+        "best_sample_weight_scheme": weight_best,
         "best_row": br.to_dict(),
         "use_log_target": USE_LOG_TARGET,
     }
@@ -727,6 +799,7 @@ def run_sklearn_search(
         "meta": meta,
         "best_pipeline": best_pl,
         "best_feature_cols": cols_best,
+        "best_sample_weight_scheme": weight_best,
     }
 
 
@@ -738,10 +811,11 @@ def run_modeling_pipeline(feature_tables: dict, output_dir: Path) -> dict[str, A
     train_df, valid_df, valid_groups = group_holdout_split(batch1_full)
     selected_blocks, feature_report, pair_report, vif_report = select_feature_blocks(train_df)
 
-    paper_sets = build_paper_feature_sets(batch1_full)
-    eda_sets = build_eda_feature_sets(selected_blocks)
+    paper_sets, paper_limits, paper_feature_report = build_paper_feature_sets(batch1_full)
+    eda_sets, eda_limits = build_eda_feature_sets(selected_blocks)
     # 기본: 논문(variance/discharge/full) + EDA(eda_all_pruned, discharge_model 스크리닝)
     feature_sets = {**paper_sets, **eda_sets}
+    feature_limits = {**paper_limits, **eda_limits}
     if OVERRIDE_INPUT_FEATURES is not None:
         cols = [c for c in OVERRIDE_INPUT_FEATURES if c in batch1_full.columns]
         missing = [c for c in OVERRIDE_INPUT_FEATURES if c not in batch1_full.columns]
@@ -754,14 +828,16 @@ def run_modeling_pipeline(feature_tables: dict, output_dir: Path) -> dict[str, A
             raise ValueError(
                 f"OVERRIDE_INPUT_FEATURES {OVERRIDE_INPUT_FEATURES!r} 중 batch1에 존재하는 컬럼이 없습니다."
             )
-        feature_sets = {"delta_q_std_only": cols}
+        feature_sets = {"override_only": cols}
+        feature_limits = {"override_only": len(cols)}
         print(f"[override] 입력 피처만 사용: {cols}", flush=True)
     elif FEATURE_SET_NAMES_TO_RUN is not None:
         feature_sets = {k: v for k, v in feature_sets.items() if k in FEATURE_SET_NAMES_TO_RUN}
+        feature_limits = {k: feature_limits.get(k, DEFAULT_MAX_FEATURES_PER_SET) for k in feature_sets}
         if not feature_sets:
             raise ValueError(
                 f"FEATURE_SET_NAMES_TO_RUN {FEATURE_SET_NAMES_TO_RUN} 에 해당하는 키가 없습니다. "
-                f"가능한 키: variance_model, discharge_model, full_model, eda_all_pruned"
+                f"가능한 키: variance_model, discharge_model, full_model, eda_all_pruned, eda_discharge_screened"
             )
 
     stability_candidates = sorted({f for fs in feature_sets.values() for f in fs})
@@ -775,7 +851,14 @@ def run_modeling_pipeline(feature_tables: dict, output_dir: Path) -> dict[str, A
     print(f"[select] blocks={selected_blocks}", flush=True)
     print(f"[feature_sets] {list(feature_sets.keys())}", flush=True)
 
-    search_df, bundle = run_sklearn_search(train_df, valid_df, batch2_test, batch3_test, feature_sets)
+    search_df, bundle = run_sklearn_search(
+        train_df,
+        valid_df,
+        batch2_test,
+        batch3_test,
+        feature_sets,
+        feature_limits,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_report.to_csv(output_dir / "feature_screen_report.csv", index=False)
@@ -784,6 +867,8 @@ def run_modeling_pipeline(feature_tables: dict, output_dir: Path) -> dict[str, A
     if not vif_report.empty:
         vif_report.to_csv(output_dir / "vif_report.csv", index=False)
     search_df.to_csv(output_dir / "model_search.csv", index=False)
+    if not paper_feature_report.empty:
+        paper_feature_report.to_csv(output_dir / "paper_feature_screen_report.csv", index=False)
     stability_report.to_csv(output_dir / "batch_stability_report.csv", index=False)
 
     sel_rows = []
@@ -863,6 +948,7 @@ def main() -> None:
     show_cols = [
         "feature_set",
         "model_name",
+        "sample_weight_scheme",
         "composite_mape",
         "test_mape",
         "test_rmse",
@@ -881,4 +967,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
