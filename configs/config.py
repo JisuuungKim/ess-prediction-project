@@ -1,9 +1,9 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = PROJECT_ROOT.parent
+WORKSPACE_ROOT = PROJECT_ROOT
 
-DEFAULT_DATA_DIR = WORKSPACE_ROOT / "archive"
+DEFAULT_DATA_DIR = WORKSPACE_ROOT / "data/raw"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/model_outputs"
 DEFAULT_FEATURE_CACHE_DIR = PROJECT_ROOT / "outputs/feature_cache"
 

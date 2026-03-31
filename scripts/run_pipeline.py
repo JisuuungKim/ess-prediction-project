@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
 MODULE_SEQUENCE = [
     "feature_engineering",
     "modeling",
+    "visualized"
 ]
 
 

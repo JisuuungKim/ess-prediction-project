@@ -53,7 +53,7 @@ def build_knee_summary(frame: pd.DataFrame, max_cycle=EARLY_CYCLE_LIMIT):
                     "cycle_life": np.nan,
                     "knee_cycle": np.nan,
                     "baseline_fade_rate": np.nan,
-                    "post_knee_fade_rate": np.nan,
+                    # "post_knee_fade_rate": np.nan,
                     "fade_acceleration_ratio": np.nan,
                 }
             )
@@ -65,7 +65,7 @@ def build_knee_summary(frame: pd.DataFrame, max_cycle=EARLY_CYCLE_LIMIT):
                 "cycle_life": float(sub["cycle_life"].iloc[0]),
                 "knee_cycle": knee,
                 "baseline_fade_rate": base,
-                "post_knee_fade_rate": post,
+                # "post_knee_fade_rate": post,
                 "fade_acceleration_ratio": abs(post / base)
                 if pd.notna(post) and pd.notna(base) and base != 0
                 else np.nan,
@@ -112,8 +112,8 @@ def extract_delta_q_features(profile: pd.DataFrame):
         "delta_q_min": float(np.nanmin(delta_q)),
         "delta_q_max": float(np.nanmax(delta_q)),
         "delta_q_range": float(np.nanmax(delta_q) - np.nanmin(delta_q)),
-        "delta_q_abs_area": float(np.trapz(np.abs(delta_q), voltage)),
-        "delta_q_signed_area": float(np.trapz(delta_q, voltage)),
+        "delta_q_abs_area": float(np.trapezoid(np.abs(delta_q), voltage)),
+        "delta_q_signed_area": float(np.trapezoid(delta_q, voltage)),
         "delta_q_lowV_mean": band_mean(2.0, 2.7),
         "delta_q_midV_mean": band_mean(2.7, 3.1),
         "delta_q_highV_mean": band_mean(3.1, None),
@@ -144,8 +144,8 @@ def build_early_summary_features(df: pd.DataFrame, max_cycle=EARLY_CYCLE_LIMIT):
         mean_IR=("IR", "mean"),
         std_IR=("IR", "std"),
         mean_Tavg=("Tavg", "mean"),
-        mean_Tmax=("Tmax", "mean"),
-        mean_Tmin=("Tmin", "mean"),
+        #mean_Tmax=("Tmax", "mean"),
+        #mean_Tmin=("Tmin", "mean"),
         mean_chargetime=("chargetime", "mean"),
     ).reset_index()
 
@@ -183,7 +183,8 @@ def build_feature_table_for_batch(bundle: dict, batch_name: str):
         )
         .merge(
             knee_summary[
-                ["cell_id", "knee_cycle", "baseline_fade_rate", "post_knee_fade_rate", "fade_acceleration_ratio"]
+                #["cell_id", "knee_cycle", "baseline_fade_rate", "post_knee_fade_rate", "fade_acceleration_ratio"]
+                ["cell_id", "knee_cycle", "baseline_fade_rate", "fade_acceleration_ratio"]
             ],
             on="cell_id",
             how="left",

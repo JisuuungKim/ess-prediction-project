@@ -11,3 +11,9 @@ outputs/feature_cache/*
 !outputs/feature_cache/.gitkeep
 outputs/model_outputs/*
 !outputs/model_outputs/.gitkeep
+
+data/raw/*
+outputs/*
+outputs
+
+cache/*
