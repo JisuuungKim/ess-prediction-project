@@ -12,7 +12,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 if __name__ == "__main__":
-    module = importlib.import_module("feature_engineering")
+    module = importlib.import_module("feature")
     if not hasattr(module, "main"):
-        raise AttributeError("src/feature_engineering.py 안에 main() 함수를 만들어 주세요.")
+        raise AttributeError("src/feature.py 안에 main() 함수를 만들어 주세요.")
     module.main()
