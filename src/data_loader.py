@@ -6,6 +6,8 @@ import re
 import logging
 from pathlib import Path
 
+import joblib
+
 import mat73
 import numpy as np
 import pandas as pd
@@ -110,12 +112,23 @@ def enrich_cycle_life_table(cycle_life_df: pd.DataFrame):
     return pd.concat([cycle_life_df.reset_index(drop=True), parsed], axis=1)
 
 
-def load_batches(data_dir, files, verbose=True):
+def load_batches(data_dir, files, cache_dir="cache", verbose=True):
     data_dir = Path(data_dir)
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)  # 캐시 폴더 자동 생성
     bundles = {}
     for batch_name, filename in files.items():
+        # 1. 캐시 파일 경로 설정
+        cache_path = cache_dir / f"{filename}.joblib"
         if verbose:
-            print(f"[load] {batch_name}: {filename}", flush=True)
+            print(f"[process] {batch_name}: {filename}", flush=True)
+        # 2. 캐시가 존재하면 바로 로드
+        if cache_path.exists():
+            if verbose:
+                print(f"  -> Loading from cache: {cache_path.name}", flush=True)
+            bundles[batch_name] = joblib.load(cache_path)
+            continue
+        # 3. 캐시가 없으면 원래대로 로드 및 처리
         mat = load_mat(data_dir / filename)
         batch = normalize_batch(mat["batch"])
         df = extract_summary(batch)
@@ -126,13 +139,19 @@ def load_batches(data_dir, files, verbose=True):
         )
         nominal_qd = df[df["cycle"] <= 5].groupby("cell_id")["QD"].median().median()
         df_clean = df[df["QD"].between(nominal_qd * 0.8, nominal_qd * 1.2)].copy()
-        bundles[batch_name] = {
+        # 결과 묶기
+        result_bundle = {
             "batch": batch,
             "df": df,
             "df_clean": df_clean,
             "cycle_life_df": cycle_life_df,
             "nominal_qd": nominal_qd,
         }
+        # 4. 처리가 끝난 결과를 캐시로 저장
+        joblib.dump(result_bundle, cache_path)
+        if verbose:
+            print(f"  -> Cached to: {cache_path.name}", flush=True)
+        bundles[batch_name] = result_bundle
         if verbose:
             print(
                 f"[loaded] {batch_name}: rows={len(df):,}, cells={cycle_life_df['cell_id'].nunique():,}",
