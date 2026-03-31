@@ -476,8 +476,13 @@ def create_all_visualizations(
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_files: list[Path] = []
+    for stale_file in output_dir.glob("*_train_*.png"):
+        stale_file.unlink(missing_ok=True)
+    plot_df = prediction_df.loc[prediction_df["split"] != "train"].copy()
+    if plot_df.empty:
+        plot_df = prediction_df.copy()
 
-    for keys, model_df in prediction_df.groupby(
+    for keys, model_df in plot_df.groupby(
         ["experiment_label", "split", "prediction_variant"],
         dropna=False,
     ):
@@ -510,7 +515,7 @@ def create_all_visualizations(
             )
         )
 
-    prediction_summary = summarize_predictions(prediction_df)
+    prediction_summary = summarize_predictions(plot_df)
     prediction_df.to_csv(output_dir / "prediction_records_normalized.csv", index=False)
     prediction_summary.to_csv(output_dir / "prediction_metrics_by_split.csv", index=False)
 
@@ -526,11 +531,12 @@ def create_all_visualizations(
 
     manifest = {
         "n_prediction_rows": int(len(prediction_df)),
+        "n_plot_rows": int(len(plot_df)),
         "n_generated_figures": int(len(generated_files)),
         "generated_files": [str(path) for path in generated_files],
-        "experiments": sorted(prediction_df["experiment_label"].dropna().unique().tolist()),
-        "splits": sorted(prediction_df["split"].dropna().unique().tolist()),
-        "prediction_variants": sorted(prediction_df["prediction_variant"].dropna().unique().tolist()),
+        "experiments": sorted(plot_df["experiment_label"].dropna().unique().tolist()),
+        "splits": sorted(plot_df["split"].dropna().unique().tolist()),
+        "prediction_variants": sorted(plot_df["prediction_variant"].dropna().unique().tolist()),
     }
     (output_dir / "visualization_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)

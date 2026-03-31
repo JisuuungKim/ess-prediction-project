@@ -22,12 +22,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="best_summary.json의 feature set 이름 또는 쉼표로 구분한 custom feature list",
     )
+    parser.add_argument(
+        "--list-feature-sets",
+        action="store_true",
+        help="선택 가능한 feature set 이름만 출력하고 종료",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     module = importlib.import_module("eda_feature_check")
+    if args.list_feature_sets:
+        if not hasattr(module, "get_available_feature_set_names"):
+            raise AttributeError("src/eda_feature_check.py 안에 get_available_feature_set_names() 함수를 만들어 주세요.")
+        for name in module.get_available_feature_set_names():
+            print(name)
+        raise SystemExit(0)
     if not hasattr(module, "main"):
         raise AttributeError("src/eda_feature_check.py 안에 main() 함수를 만들어 주세요.")
     module.main(requested_feature_set=args.feature_set)

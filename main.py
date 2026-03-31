@@ -25,6 +25,13 @@ TASKS = {
 }
 
 
+def get_eda_feature_prompt_context() -> tuple[list[str], str | None]:
+    module = importlib.import_module("eda_feature_check")
+    names = module.get_available_feature_set_names() if hasattr(module, "get_available_feature_set_names") else []
+    last_selection = module.load_last_feature_selection() if hasattr(module, "load_last_feature_selection") else {}
+    return names, last_selection.get("label")
+
+
 def run_module(module_name: str, *, feature_set: str | None = None) -> None:
     module = importlib.import_module(module_name)
     if not hasattr(module, "main"):
@@ -72,9 +79,16 @@ def prompt_task_selection() -> tuple[str | None, str | None]:
         module_name = TASKS[selected][0]
         feature_set = None
         if module_name in {"eda_feature_check", "pipeline_with_eda"}:
+            feature_set_names, last_label = get_eda_feature_prompt_context()
+            if feature_set_names:
+                print("선택 가능한 feature set 이름:")
+                print("  " + ", ".join(feature_set_names))
+            if last_label:
+                print(f"마지막 선택 feature set: {last_label}")
             feature_set = input(
                 "보고 싶은 feature set 이름을 입력하세요. "
-                "엔터만 누르면 best_summary의 best_feature_set을 사용합니다: "
+                "엔터만 누르면 마지막에 고른 feature들을 사용합니다. "
+                "처음이면 best_summary의 best_feature_set을 사용합니다: "
             ).strip()
             feature_set = feature_set or None
         return module_name, feature_set
