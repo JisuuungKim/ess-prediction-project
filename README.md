@@ -10,19 +10,6 @@
 - 평가 데이터 : Batch 2 (2018-02-20)
 - 태스크 : Regression (Cycle Life 예측)
 
-## 현재 실행 흐름
-
-```bash
-python scripts/run_feature_engineering.py
-python scripts/run_modeling.py
-```
-
-한 번에 실행하려면:
-
-```bash
-python scripts/run_pipeline.py
-```
-
 ## 파일 구조
 
 ```
@@ -56,10 +43,28 @@ python scripts/run_pipeline.py
 ```
 
 ## 환경 설정
+```bash
+git clone https://github.com/팀명/ess-battery-project
+cd ess-prediction-project
+python3.11 -m venv test_env
+source test_env/bin/activate
+pip install -r requirements.txt
+```
+configs/config.py파일 변경 (DEFAULT_DATA_DIR,DEFAULT_OUTPUT_DIR,DEFAULT_FEATURE_CACHE_DIR) 에 대해서 설정해준다.
+
+
+
+## 현재 실행 흐름
 
 ```bash
-git clone https://github.com/JisuuungKim/ess-prediction-project.git
-pip install -r requirements.txt
+python scripts/run_feature_engineering.py
+python scripts/run_modeling.py
+```
+
+한 번에 실행하려면:
+
+```bash
+python scripts/run_pipeline.py
 ```
 
 ## EDA
