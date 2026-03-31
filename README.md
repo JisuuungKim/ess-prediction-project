@@ -152,11 +152,14 @@ EDA 결과를 바탕으로 선택한 Feature와 선택한 이유는 다음과 �
 
 ### 모델 선택 및 근거
 
-- 성능 결과![1774943856967](image/README/1774943856967.png)
+- 성능 결과
+
+  <img width="1454" height="532" alt="image" src="https://github.com/user-attachments/assets/60609f85-d49e-46dc-8683-8e91c0721fcd" />
+
 
 •  **후보 모델** : **ElasticNetCV, Ridge, ElasticNet**
 
-•**최종 모델** : **ElasticNetCV** (Feature Set: `eda_discharge_screened`, Sample Weight: `inv_cycle`)
+• **최종 모델** : **ElasticNetCV** (Feature Set: `eda_discharge_screened`, Sample Weight: `inv_cycle`)
 
 •  **선택 이유** :
 •**최적의 성능 지표** : 여러 후보군 중 **Composite MAPE(22.00%)** 및 **Test MAPE(21.25%)**가 가장 낮아 예측 정확도가 가장 우수합니다.
