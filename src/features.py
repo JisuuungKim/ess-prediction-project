@@ -11,6 +11,19 @@ from data_loader import get_cell_cycles, load_batches, to_float_array
 
 
 EARLY_CYCLE_LIMIT = 100
+FINAL_FEATURE_COLUMNS = [
+    "mean_chargetime",
+    "temp_rise_100",
+    "baseline_QD",
+    "baseline_QC",
+    "mean_c_rate",
+    "max_c_rate",
+    "policy_steps",
+    "mean_Tavg",
+    "delta_q_std",
+    "delta_q_highV_mean",
+    "delta_q_max",
+]
 
 
 def find_knee_point(cycles, qd, min_cycle=80, window=25, acceleration_factor=2.0):
@@ -139,6 +152,8 @@ def build_early_summary_features(df: pd.DataFrame, max_cycle=EARLY_CYCLE_LIMIT):
 
     summary = grouped.agg(
         cycle_life=("cycle_life", "first"),
+        baseline_QD=("QD", "median"),
+        baseline_QC=("QC", "median"),
         mean_QD=("QD", "mean"),
         std_QD=("QD", "std"),
         mean_IR=("IR", "mean"),
@@ -168,6 +183,11 @@ def build_early_summary_features(df: pd.DataFrame, max_cycle=EARLY_CYCLE_LIMIT):
     return summary
 
 
+def add_nonlinear_features(feature_table: pd.DataFrame):
+    d = feature_table.copy()
+    return d.replace([np.inf, -np.inf], np.nan)
+
+
 def build_feature_table_for_batch(bundle: dict, batch_name: str):
     early = build_early_summary_features(bundle["df"])
     knee_summary = build_knee_summary(bundle["df_clean"], max_cycle=EARLY_CYCLE_LIMIT)
@@ -176,7 +196,7 @@ def build_feature_table_for_batch(bundle: dict, batch_name: str):
     feature_table = (
         early.merge(
             bundle["cycle_life_df"][
-                ["cell_id", "charging_policy", "max_c_rate", "mean_c_rate", "switch_soc_pct", "policy_steps"]
+                ["cell_id", "charging_policy", "max_c_rate", "mean_c_rate", "policy_steps"]
             ],
             on="cell_id",
             how="left",
@@ -191,8 +211,12 @@ def build_feature_table_for_batch(bundle: dict, batch_name: str):
         )
         .merge(delta_q.drop(columns=["cycle_life"], errors="ignore"), on="cell_id", how="left")
     )
+    feature_table = add_nonlinear_features(feature_table)
     feature_table["batch"] = batch_name
-    return feature_table
+
+    keep_cols = ["cell_id", "cycle_life", "charging_policy", "batch", *FINAL_FEATURE_COLUMNS]
+    keep_cols = [col for col in keep_cols if col in feature_table.columns]
+    return feature_table[keep_cols].copy()
 
 
 def build_feature_tables(batches: dict, verbose=True):
